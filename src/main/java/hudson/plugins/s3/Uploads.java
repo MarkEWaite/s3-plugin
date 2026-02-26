@@ -4,7 +4,6 @@ import hudson.FilePath;
 import software.amazon.awssdk.core.async.AsyncRequestBody;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.transfer.s3.S3TransferManager;
-import software.amazon.awssdk.transfer.s3.model.FileUpload;
 import software.amazon.awssdk.transfer.s3.model.Upload;
 import software.amazon.awssdk.transfer.s3.model.UploadRequest;
 import software.amazon.awssdk.transfer.s3.progress.TransferListener;
@@ -14,8 +13,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 
@@ -25,9 +30,22 @@ public final class Uploads {
     public static final int MULTIPART_UPLOAD_THRESHOLD = 16*1024*1024; // 16 MB
 
     private static transient volatile Uploads instance;
-    private final transient HashMap<FilePath, Upload> startedUploads = new HashMap<>();
-    private final ExecutorService executors = Executors.newScheduledThreadPool(1, new NamedThreadFactory(Executors.defaultThreadFactory(), Uploads.class.getName()));
-    private final transient HashMap<FilePath, InputStream> openedStreams = new HashMap<>();
+
+    private final transient Map<FilePath, Upload> startedUploads = new ConcurrentHashMap<>();
+    private final ExecutorService executors;
+    // This creates a cached thread pool with an upper bound (5) on threads to be spawned on demand.
+    {
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(
+            5, 5,
+            60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(),
+            new NamedThreadFactory(Executors.defaultThreadFactory(), Uploads.class.getName())
+        );
+        pool.allowCoreThreadTimeOut(true);
+        executors = pool;
+    }
+
+    private final transient Map<FilePath, InputStream> openedStreams = new ConcurrentHashMap<>();
 
     public Upload startUploading(S3TransferManager manager, FilePath file, InputStream inputStream, String bucketName, String objectName, Metadata metadata, TransferListener listener) {
         UploadRequest.Builder request = UploadRequest.builder();
@@ -43,16 +61,24 @@ public final class Uploads {
         return upload;
     }
 
-    public void finishUploading(FilePath filePath) throws InterruptedException {
+    public void finishUploading(FilePath filePath) throws InterruptedException, IOException {
         final Upload upload = startedUploads.remove(filePath);
         if (upload == null) {
             LOGGER.info("File: " + filePath.getName() + " already was uploaded");
             return;
         }
         try {
-            upload.completionFuture().join();
-        }
-        finally {
+            upload.completionFuture().get(1, TimeUnit.HOURS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            upload.completionFuture().cancel(true); // cancel the upload
+            throw e;
+        } catch (ExecutionException e) {
+            throw new IOException("Upload failed for: " + filePath.getName(), e.getCause());
+        } catch (TimeoutException e) {
+            upload.completionFuture().cancel(true);
+            throw new IOException("Upload timed out for: " + filePath.getName(), e);
+        } finally {
             closeStream(filePath);
         }
     }
