@@ -18,7 +18,6 @@ import org.kohsuke.stapler.DataBoundSetter;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
-import software.amazon.awssdk.services.s3.model.ListObjectsRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.S3Object;
@@ -148,6 +147,22 @@ public class S3Profile {
                                     final boolean managedArtifacts,
                                     final boolean useServerSideEncryption,
                                     final boolean gzipFiles) throws IOException, InterruptedException {
+        return upload(run, bucketName, filePaths, fileNames, userMetadata, storageClass, selregion,
+                uploadFromSlave, managedArtifacts, useServerSideEncryption, gzipFiles, 30);
+    }
+
+    public List<FingerprintRecord> upload(Run<?, ?> run,
+                                    final String bucketName,
+                                    final List<FilePath> filePaths,
+                                    final List<String> fileNames,
+                                    final Map<String, String> userMetadata,
+                                    final String storageClass,
+                                    final String selregion,
+                                    final boolean uploadFromSlave,
+                                    final boolean managedArtifacts,
+                                    final boolean useServerSideEncryption,
+                                    final boolean gzipFiles,
+                                    final int uploadTimeout) throws IOException, InterruptedException {
         final List<FingerprintRecord> fingerprints = new ArrayList<>(fileNames.size());
 
         try {
@@ -174,18 +189,15 @@ public class S3Profile {
                             storageClass, selregion, useServerSideEncryption, getProxy(), usePathStyle);
                 }
 
-                final FingerprintRecord fingerprintRecord = repeat(maxUploadRetries, uploadRetryTime, dest, new Callable<FingerprintRecord>() {
-                    @Override
-                    public FingerprintRecord call() throws IOException, InterruptedException {
-                        final String md5 = invoke(uploadFromSlave, filePath, upload);
-                        return new FingerprintRecord(produced, bucketName, fileName, selregion, md5);
-                    }
+                final FingerprintRecord fingerprintRecord = repeat(maxUploadRetries, uploadRetryTime, dest, () -> {
+                    final String md5 = invoke(uploadFromSlave, filePath, upload);
+                    return new FingerprintRecord(produced, bucketName, fileName, selregion, md5);
                 });
 
                 fingerprints.add(fingerprintRecord);
             }
 
-            waitUploads(filePaths, uploadFromSlave);
+            waitUploads(filePaths, uploadFromSlave, uploadTimeout);
         } catch (InterruptedException | IOException exception) {
             cleanupUploads(filePaths, uploadFromSlave);
             throw exception;
@@ -204,9 +216,9 @@ public class S3Profile {
         }
     }
 
-    private void waitUploads(final List<FilePath> filePaths, boolean uploadFromSlave) throws InterruptedException, IOException {
+    private void waitUploads(final List<FilePath> filePaths, boolean uploadFromSlave, int uploadTimeout) throws InterruptedException, IOException {
         for (FilePath filePath : filePaths) {
-            invoke(uploadFromSlave, filePath, new S3WaitUploadCallable());
+            invoke(uploadFromSlave, filePath, new S3WaitUploadCallable(uploadTimeout));
         }
     }
 

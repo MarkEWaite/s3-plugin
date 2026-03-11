@@ -27,7 +27,6 @@ import hudson.tasks.Fingerprinter.FingerprintAction;
 import hudson.tasks.Publisher;
 import hudson.tasks.Recorder;
 import hudson.util.CopyOnWriteList;
-import hudson.util.FormFillFailure;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
 import hudson.util.Secret;
@@ -41,6 +40,7 @@ import org.kohsuke.accmod.Restricted;
 import org.kohsuke.accmod.restrictions.DoNotUse;
 import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest2;
 import org.kohsuke.stapler.interceptor.RequirePOST;
@@ -68,6 +68,7 @@ public final class S3BucketPublisher extends Recorder implements SimpleBuildStep
 
     private boolean dontWaitForConcurrentBuildCompletion;
     private boolean dontSetBuildResultOnFailure;
+    private int uploadTimeout = 30; // default 30 mins
 
     /**
      * In-memory representation of console log level.
@@ -242,6 +243,11 @@ public final class S3BucketPublisher extends Recorder implements SimpleBuildStep
         return ImmutableList.of(new S3ArtifactsProjectAction(project));
     }
 
+    @DataBoundSetter
+    public void setUploadTimeout(int uploadTimeout) {
+        this.uploadTimeout = Math.max(uploadTimeout, Uploads.MIN_UPLOAD_TIMEOUT);
+    }
+
     private void log(final PrintStream logger, final String message) {
         log(Level.INFO, logger, message);
     }
@@ -327,7 +333,7 @@ public final class S3BucketPublisher extends Recorder implements SimpleBuildStep
                 final Map<String, String> escapedMetadata = buildMetadata(envVars, entry);
 
                 final List<FingerprintRecord> records = Lists.newArrayList();
-                final List<FingerprintRecord> fingerprints = profile.upload(run, bucket, paths, filenames, escapedMetadata, storageClass, selRegion, entry.uploadFromSlave, entry.managedArtifacts, entry.useServerSideEncryption, entry.gzipFiles);
+                final List<FingerprintRecord> fingerprints = profile.upload(run, bucket, paths, filenames, escapedMetadata, storageClass, selRegion, entry.uploadFromSlave, entry.managedArtifacts, entry.useServerSideEncryption, entry.gzipFiles, uploadTimeout);
 
                 for (FingerprintRecord fingerprintRecord : fingerprints) {
                     records.add(fingerprintRecord);

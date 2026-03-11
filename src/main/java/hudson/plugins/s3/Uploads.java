@@ -34,6 +34,7 @@ public final class Uploads {
     private final transient Map<FilePath, Upload> startedUploads = new ConcurrentHashMap<>();
     private final ExecutorService executors;
     // This creates a cached thread pool with an upper bound (5) on threads to be spawned on demand.
+    // TODO: S3 client could use Virtual threads when baseline is Java 21
     {
         ThreadPoolExecutor pool = new ThreadPoolExecutor(
             5, 5,
@@ -44,6 +45,8 @@ public final class Uploads {
         pool.allowCoreThreadTimeOut(true);
         executors = pool;
     }
+    public static final int DEFAULT_UPLOAD_TIMEOUT = 30;
+    public static final int MIN_UPLOAD_TIMEOUT = 5;
 
     private final transient Map<FilePath, InputStream> openedStreams = new ConcurrentHashMap<>();
 
@@ -62,13 +65,18 @@ public final class Uploads {
     }
 
     public void finishUploading(FilePath filePath) throws InterruptedException, IOException {
+        finishUploading(filePath, DEFAULT_UPLOAD_TIMEOUT);
+    }
+
+    public void finishUploading(FilePath filePath, int uploadTimeout) throws InterruptedException, IOException {
+        int effectiveTimeout = Math.max(uploadTimeout, MIN_UPLOAD_TIMEOUT);
         final Upload upload = startedUploads.remove(filePath);
         if (upload == null) {
             LOGGER.info("File: " + filePath.getName() + " already was uploaded");
             return;
         }
         try {
-            upload.completionFuture().get(1, TimeUnit.HOURS);
+            upload.completionFuture().get(effectiveTimeout, TimeUnit.MINUTES);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             upload.completionFuture().cancel(true); // cancel the upload
@@ -77,7 +85,7 @@ public final class Uploads {
             throw new IOException("Upload failed for: " + filePath.getName(), e.getCause());
         } catch (TimeoutException e) {
             upload.completionFuture().cancel(true);
-            throw new IOException("Upload timed out for: " + filePath.getName(), e);
+            throw new IOException("Upload timed out after " + effectiveTimeout + " minutes for: " + filePath.getName(), e);
         } finally {
             closeStream(filePath);
         }
@@ -108,6 +116,10 @@ public final class Uploads {
             }
         }
         return instance;
+    }
+
+    void injectUpload(FilePath file, Upload upload) {
+        startedUploads.put(file, upload);
     }
 
     public static class Metadata {
